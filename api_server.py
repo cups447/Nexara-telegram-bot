@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import json
+import asyncio
 from pathlib import Path
 from datetime import datetime
 
@@ -24,7 +25,6 @@ tg_app = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tg_app
-    # Startup: Start Telegram Bot in background
     if TELEGRAM_BOT_TOKEN:
         tg_app = build_telegram_app()
         await tg_app.initialize()
@@ -32,7 +32,6 @@ async def lifespan(app: FastAPI):
         await tg_app.updater.start_polling()
         print("✅ Telegram Bot started in background...")
     yield
-    # Shutdown: Stop Telegram Bot
     if tg_app:
         await tg_app.updater.stop()
         await tg_app.stop()
@@ -104,6 +103,84 @@ async def scan_now():
     save_state(state)
 
     signals = get_all_signals()
+
+    state["scan_running"] = False
+    state["last_scan_count"] = len(signals)
+    state["last_scan_time"] = datetime.utcnow().isoformat()
+    state["last_signals"] = signals[:20]
+    save_state(state)
+
+    return {
+        "success": True,
+        "count": len(signals),
+        "signals": signals
+    }
+
+@app.post("/api/trade/run")
+async def trade_run():
+    state = load_state()
+    state["scan_running"] = True
+    save_state(state)
+
+    signals = get_all_signals()
+
+    state["scan_running"] = False
+    state["last_scan_count"] = len(signals)
+    state["last_scan_time"] = datetime.utcnow().isoformat()
+    state["last_signals"] = signals[:20]
+
+    executed_orders = []
+
+    if signals:
+        top_for_alert = signals[:10]
+        msg_lines = [f"📡 NEXARA Signals ({len(signals)})"]
+        for s in top_for_alert:
+            msg_lines.append(
+                f"{s['symbol']} | {s['signal']} | entry={s['entry']} | TP={s['take_profit']} | SL={s['stop_loss']} | score={s['score']}"
+            )
+        await send_telegram_message("\n".join(msg_lines))
+    else:
+        await send_telegram_message("NEXARA: nta actionable signals zabonetse muri iyi scan.")
+
+    if state.get("auto_enabled") and signals:
+        auto_candidates = signals[:MAX_AUTO_TRADES_PER_SCAN]
+
+        for s in auto_candidates:
+            action = s.get("signal")
+            if action not in ("BUY", "SELL"):
+                continue
+
+            price = s.get("entry") or 0
+            qty = executor.calculate_qty_from_usdt(price)
+            if qty <= 0:
+                continue
+
+            order = executor.place_market_order(
+                symbol=s["symbol"],
+                side=action,
+                qty=qty
+            )
+            executed_orders.append(order)
+
+        state["last_trades"] = executed_orders
+
+        if executed_orders:
+            trade_lines = ["💼 NEXARA Auto Trades"]
+            for t in executed_orders:
+                trade_lines.append(
+                    f"{t['symbol']} | {t['side']} | qty={t['qty']} | mode={t['mode']}"
+                )
+            await send_telegram_message("\n".join(trade_lines))
+
+    save_state(state)
+
+    return {
+        "success": True,
+        "signals_count": len(signals),
+        "signals": signals,
+        "auto_enabled": state.get("auto_enabled"),
+        "executed_orders": executed_orders
+    }
 
     state["scan_running"] = False
     state["last_scan_count"] = len(signals)

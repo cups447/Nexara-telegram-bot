@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+python-telegram-bot==21.6
+pydantic
+python-dotenv
+ccxt
+pandas
+cryptography
